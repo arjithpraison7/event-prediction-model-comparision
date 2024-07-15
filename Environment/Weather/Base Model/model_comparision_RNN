@@ -1,0 +1,136 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import SimpleRNN, Dense
+from tensorflow.keras.optimizers import Adam
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+# Step 1: Data collection and preprocessing
+# Load your climate data
+file_path = r'Environment\Weather\WeatherData.xlsx'
+df = pd.read_excel(file_path, engine='openpyxl')
+
+# Display basic information about the dataset
+print(df.info())
+print("\nFirst few rows of the data:")
+print(df.head())
+
+# Convert 'Date' column to datetime
+df['Date'] = pd.to_datetime(df['Date'])
+
+# Set 'Date' as the index
+df.set_index('Date', inplace=True)
+
+# Drop non-numeric columns
+numeric_columns = df.select_dtypes(include=[np.number]).columns
+df_numeric = df[numeric_columns]
+
+print("NaN values in the dataset:")
+print(df_numeric.isna().sum())
+
+# Step 2: Exploratory Data Analysis (EDA)
+
+# Correlation matrix
+plt.figure(figsize=(12, 10))
+sns.heatmap(df_numeric.corr(), annot=True, cmap='coolwarm')
+plt.title('Correlation Matrix of Climate Variables')
+plt.show()
+
+
+print("NaN values in the dataset:")
+print(df_numeric.isna().sum())
+
+# Drop the row with NaN value
+df_numeric_cleaned = df_numeric.dropna()
+print(f"Dropped {len(df_numeric) - len(df_numeric_cleaned)} row(s) with NaN values")
+
+# Select features for X (input) and y (target)
+feature_columns = ['Evap', 'FAO56_ET', 'Radiation', 'RH1', 'RH2', 'MaxT']
+target_column = 'MaxT'
+
+# Prepare the data
+X_data = df_numeric_cleaned[feature_columns].values
+y_data = df_numeric_cleaned[target_column].values.reshape(-1, 1)
+
+# Use separate scalers for X and y
+X_scaler = MinMaxScaler(feature_range=(0, 1))
+y_scaler = MinMaxScaler(feature_range=(0, 1))
+
+X_scaled = X_scaler.fit_transform(X_data)
+y_scaled = y_scaler.fit_transform(y_data)
+
+# Modify the create_sequences function for multivariate input
+def create_sequences(X, y, seq_length):
+    X_seq, y_seq = [], []
+    for i in range(len(X) - seq_length):
+        X_seq.append(X[i:i+seq_length])
+        y_seq.append(y[i+seq_length])
+    return np.array(X_seq), np.array(y_seq)
+
+seq_length = 60
+X, y = create_sequences(X_scaled, y_scaled, seq_length)
+
+# Split the data into training and testing sets
+train_size = int(len(X) * 0.8)
+X_train, X_test = X[:train_size], X[train_size:]
+y_train, y_test = y[:train_size], y[train_size:]
+
+# Build and compile the model
+model = Sequential([
+    SimpleRNN(50, activation='tanh', return_sequences=True, input_shape=(seq_length, len(feature_columns))),
+    SimpleRNN(50, activation='tanh'),
+    Dense(1)
+])
+
+model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+
+# Train the model
+history = model.fit(X_train, y_train, epochs=50, batch_size=32, validation_split=0.1, verbose=1)
+
+# Make predictions
+train_predict = model.predict(X_train)
+test_predict = model.predict(X_test)
+
+# Inverse transform the predictions and actual values
+train_predict = y_scaler.inverse_transform(train_predict)
+y_train_inv = y_scaler.inverse_transform(y_train)
+test_predict = y_scaler.inverse_transform(test_predict)
+y_test_inv = y_scaler.inverse_transform(y_test)
+
+# Calculate evaluation metrics
+def calculate_metrics(y_true, y_pred):
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_true, y_pred)
+    return mae, mse, rmse, r2
+
+train_mae, train_mse, train_rmse, train_r2 = calculate_metrics(y_train_inv, train_predict)
+test_mae, test_mse, test_rmse, test_r2 = calculate_metrics(y_test_inv, test_predict)
+
+print("Training Set Metrics:")
+print(f"MAE: {train_mae:.4f}")
+print(f"MSE: {train_mse:.4f}")
+print(f"RMSE: {train_rmse:.4f}")
+print(f"R2 Score: {train_r2:.4f}")
+
+print("\nTest Set Metrics:")
+print(f"MAE: {test_mae:.4f}")
+print(f"MSE: {test_mse:.4f}")
+print(f"RMSE: {test_rmse:.4f}")
+print(f"R2 Score: {test_r2:.4f}")
+
+# Plot the results
+plt.figure(figsize=(16, 8))
+plt.plot(df_numeric_cleaned.index[seq_length:train_size+seq_length], y_train_inv, label='Actual (Train)')
+plt.plot(df_numeric_cleaned.index[seq_length:train_size+seq_length], train_predict, label='Predicted (Train)')
+plt.plot(df_numeric_cleaned.index[train_size+seq_length:], y_test_inv, label='Actual (Test)')
+plt.plot(df_numeric_cleaned.index[train_size+seq_length:], test_predict, label='Predicted (Test)')
+plt.title(f'{target_column} Prediction')
+plt.xlabel('Time')
+plt.ylabel(target_column)
+plt.legend()
+plt.show()

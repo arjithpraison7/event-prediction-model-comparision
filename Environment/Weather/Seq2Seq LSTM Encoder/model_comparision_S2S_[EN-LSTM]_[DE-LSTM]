@@ -1,0 +1,201 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, LSTM, GRU, Dense, RepeatVector, TimeDistributed
+from tensorflow.keras.optimizers import Adam
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+# Step 1: Data collection and preprocessing
+file_path = r'Environment\Weather\WeatherData.xlsx'
+df = pd.read_excel(file_path, engine='openpyxl')
+
+# Display basic information about the dataset
+print(df.info())
+print("\nFirst few rows of the data:")
+print(df.head())
+
+# Convert 'Date' column to datetime
+df['Date'] = pd.to_datetime(df['Date'])
+
+# Set 'Date' as the index
+df.set_index('Date', inplace=True)
+
+# Drop non-numeric columns
+numeric_columns = df.select_dtypes(include=[np.number]).columns
+df_numeric = df[numeric_columns]
+
+print("NaN values in the dataset:")
+print(df_numeric.isna().sum())
+
+# Step 2: Exploratory Data Analysis (EDA)
+plt.figure(figsize=(12, 10))
+sns.heatmap(df_numeric.corr(), annot=True, cmap='coolwarm')
+plt.title('Correlation Matrix of Climate Variables')
+plt.show()
+
+# Drop rows with NaN values
+df_numeric_cleaned = df_numeric.dropna()
+print(f"Dropped {len(df_numeric) - len(df_numeric_cleaned)} row(s) with NaN values")
+
+# Select features for X (input) and y (target)
+feature_columns = ['Evap', 'FAO56_ET', 'Radiation', 'RH1', 'RH2', 'MaxT']
+target_column = 'MaxT'
+
+# Prepare the data
+X_data = df_numeric_cleaned[feature_columns].values
+y_data = df_numeric_cleaned[target_column].values.reshape(-1, 1)
+
+# Use separate scalers for X and y
+X_scaler = MinMaxScaler(feature_range=(0, 1))
+y_scaler = MinMaxScaler(feature_range=(0, 1))
+
+X_scaled = X_scaler.fit_transform(X_data)
+y_scaled = y_scaler.fit_transform(y_data)
+
+# Create sequences for training
+def create_sequences(features, target, input_seq_length, output_seq_length):
+    X, y = [], []
+    for i in range(len(features) - input_seq_length - output_seq_length + 1):
+        X.append(features[i:(i + input_seq_length)])
+        y.append(target[(i + input_seq_length):(i + input_seq_length + output_seq_length)])
+    return np.array(X), np.array(y)
+
+input_seq_length = 60  # Number of time steps to look back
+output_seq_length = 30  # Number of time steps to predict
+X, y = create_sequences(X_scaled, y_scaled, input_seq_length, output_seq_length)
+
+# Split the data into training and testing sets
+train_size = int(len(X) * 0.8)
+X_train, X_test = X[:train_size], X[train_size:]
+y_train, y_test = y[:train_size], y[train_size:]
+
+# Print shapes for debugging
+print(f"X shape: {X.shape}, y shape: {y.shape}")
+print(f"X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
+print(f"X_test shape: {X_test.shape}, y_test shape: {y_test.shape}")
+
+# Step 3: Model architecture design
+def create_seq2seq_model(input_seq_length, output_seq_length, n_features, units=50):
+    # Encoder
+    encoder_inputs = Input(shape=(input_seq_length, n_features))
+    encoder = LSTM(units, return_state=True)
+    encoder_outputs, state_h, state_c = encoder(encoder_inputs)
+    
+    # Decoder
+    decoder_inputs = RepeatVector(output_seq_length)(state_h)
+    decoder_gru = GRU(units, return_sequences=True)
+    decoder_outputs = decoder_gru(decoder_inputs, initial_state=state_h)
+    decoder_dense = TimeDistributed(Dense(1))
+    decoder_outputs = decoder_dense(decoder_outputs)
+    
+    model = Model(encoder_inputs, decoder_outputs)
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    return model
+
+model = create_seq2seq_model(input_seq_length, output_seq_length, n_features=len(feature_columns))
+
+# Step 4: Training the model
+history = model.fit(X_train, y_train, epochs=50, batch_size=32, validation_split=0.1, verbose=1)
+
+# Step 5: Evaluation and prediction
+train_predict = model.predict(X_train)
+test_predict = model.predict(X_test)
+
+# Reshape predictions and actual values
+train_predict = train_predict.reshape(-1, 1)
+test_predict = test_predict.reshape(-1, 1)
+y_train_inv = y_train.reshape(-1, 1)
+y_test_inv = y_test.reshape(-1, 1)
+
+# Inverse transform the predictions and actual values
+train_predict = y_scaler.inverse_transform(train_predict)
+y_train_inv = y_scaler.inverse_transform(y_train_inv)
+test_predict = y_scaler.inverse_transform(test_predict)
+y_test_inv = y_scaler.inverse_transform(y_test_inv)
+
+# Calculate evaluation metrics
+def calculate_metrics(y_true, y_pred):
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_true, y_pred)
+    return mae, mse, rmse, r2
+
+train_mae, train_mse, train_rmse, train_r2 = calculate_metrics(y_train_inv, train_predict)
+test_mae, test_mse, test_rmse, test_r2 = calculate_metrics(y_test_inv, test_predict)
+
+print("Training Set Metrics:")
+print(f"MAE: {train_mae:.4f}")
+print(f"MSE: {train_mse:.4f}")
+print(f"RMSE: {train_rmse:.4f}")
+print(f"R2 Score: {train_r2:.4f}")
+
+print("\nTest Set Metrics:")
+print(f"MAE: {test_mae:.4f}")
+print(f"MSE: {test_mse:.4f}")
+print(f"RMSE: {test_rmse:.4f}")
+print(f"R2 Score: {test_r2:.4f}")
+
+# Calculate percentage error
+def mean_absolute_percentage_error(y_true, y_pred):
+    return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+
+train_mape = mean_absolute_percentage_error(y_train_inv, train_predict)
+test_mape = mean_absolute_percentage_error(y_test_inv, test_predict)
+
+print(f"\nTraining Set MAPE: {train_mape:.2f}%")
+print(f"Test Set MAPE: {test_mape:.2f}%")
+
+# Plot the results
+plt.figure(figsize=(16, 8))
+
+# Calculate the correct date ranges
+train_dates = df_numeric_cleaned.index[input_seq_length:input_seq_length+len(y_train_inv)]
+test_dates = df_numeric_cleaned.index[input_seq_length+len(y_train_inv):input_seq_length+len(y_train_inv)+len(y_test_inv)]
+
+# Ensure all arrays have the same length
+min_train_length = min(len(train_dates), len(y_train_inv), len(train_predict))
+min_test_length = min(len(test_dates), len(y_test_inv), len(test_predict))
+
+plt.plot(train_dates[:min_train_length], y_train_inv[:min_train_length], label='Actual (Train)')
+plt.plot(train_dates[:min_train_length], train_predict[:min_train_length], label='Predicted (Train)')
+plt.plot(test_dates[:min_test_length], y_test_inv[:min_test_length], label='Actual (Test)')
+plt.plot(test_dates[:min_test_length], test_predict[:min_test_length], label='Predicted (Test)')
+
+plt.title('Weather MaxT Prediction (Seq2Seq with LSTM Encoder and GRU Decoder)')
+plt.xlabel('Date')
+plt.ylabel('MaxT')
+plt.legend()
+plt.show()
+
+# Function to predict future values
+def predict_future(model, last_sequence, num_steps):
+    future_predictions = []
+    current_sequence = last_sequence.copy()
+    
+    for _ in range(num_steps // output_seq_length):
+        prediction = model.predict(current_sequence.reshape(1, input_seq_length, len(feature_columns)))
+        future_predictions.append(prediction[0])
+        current_sequence = np.roll(current_sequence, -output_seq_length, axis=0)
+        current_sequence[-output_seq_length:, -1] = prediction[0, :, 0]  # Update only the target column
+    
+    return np.array(future_predictions).reshape(-1, 1)
+
+# Predict the next 30 days
+last_sequence = X_scaled[-input_seq_length:]
+future_predictions = predict_future(model, last_sequence, 30)
+future_predictions = y_scaler.inverse_transform(future_predictions).flatten()
+
+# Plot future predictions
+future_dates = pd.date_range(start=df_numeric_cleaned.index[-1] + pd.Timedelta(days=1), periods=30)
+plt.figure(figsize=(16, 8))
+plt.plot(df_numeric_cleaned.index, df_numeric_cleaned[target_column], label='Historical Data')
+plt.plot(future_dates, future_predictions, label='Future Predictions')
+plt.title('Weather MaxT Prediction - Next 30 Days (Seq2Seq with LSTM Encoder and GRU Decoder)')
+plt.xlabel('Date')
+plt.ylabel('MaxT')
+plt.legend()
+plt.show()

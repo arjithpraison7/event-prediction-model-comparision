@@ -1,0 +1,150 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import GRU, Dense
+from tensorflow.keras.optimizers import Adam
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+# Step 1: Data collection and preprocessing
+# Load AAPL historic data (you'll need to provide this data)
+df = pd.read_csv('D:\Mechatronics\Master Thesis\Stock Prediction\YahooFinance\GOOGL\GOOGL.csv')
+df['Date'] = pd.to_datetime(df['Date'])
+df = df.sort_values('Date')
+
+# Extract the 'Close' prices
+data = df['Close'].values.reshape(-1, 1)
+
+# Normalize the data
+scaler = MinMaxScaler(feature_range=(0, 1))
+scaled_data = scaler.fit_transform(data)
+
+# Create sequences for training
+def create_sequences(data, seq_length):
+    X, y = [], []
+    for i in range(len(data) - seq_length):
+        X.append(data[i:i+seq_length])
+        y.append(data[i+seq_length])
+    return np.array(X), np.array(y)
+
+seq_length = 60  # Number of time steps to look back
+X, y = create_sequences(scaled_data, seq_length)
+
+# Split the data into training and testing sets
+train_size = int(len(X) * 0.8)
+X_train, X_test = X[:train_size], X[train_size:]
+y_train, y_test = y[:train_size], y[train_size:]
+
+model = Sequential([
+    GRU(50, activation='tanh', return_sequences=True, input_shape=(seq_length, 1)),
+    GRU(50, activation='tanh'),
+    Dense(1)
+])
+
+model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+
+# Step 3: Training the model
+history = model.fit(X_train, y_train, epochs=50, batch_size=32, validation_split=0.1, verbose=1)
+
+# Step 4: Evaluation and prediction
+# Evaluate the model
+train_loss = model.evaluate(X_train, y_train, verbose=0)
+test_loss = model.evaluate(X_test, y_test, verbose=0)
+print(f'Train Loss: {train_loss:.4f}')
+print(f'Test Loss: {test_loss:.4f}')
+
+# Make predictions
+train_predict = model.predict(X_train)
+test_predict = model.predict(X_test)
+
+# Inverse transform the predictions
+train_predict = scaler.inverse_transform(train_predict)
+y_train = scaler.inverse_transform(y_train)
+test_predict = scaler.inverse_transform(test_predict)
+y_test = scaler.inverse_transform(y_test)
+
+# Plot the results
+plt.figure(figsize=(16, 8))
+plt.plot(df['Date'][seq_length:train_size+seq_length], y_train, label='Actual (Train)')
+plt.plot(df['Date'][seq_length:train_size+seq_length], train_predict, label='Predicted (Train)')
+plt.plot(df['Date'][train_size+seq_length:], y_test, label='Actual (Test)')
+plt.plot(df['Date'][train_size+seq_length:], test_predict, label='Predicted (Test)')
+plt.title('AAPL Stock Price Prediction')
+plt.xlabel('Date')
+plt.ylabel('Close Price')
+plt.legend()
+plt.show()
+
+# Function to predict future values
+def predict_future(model, last_sequence, num_steps):
+    future_predictions = []
+    current_sequence = last_sequence.copy()
+    
+    for _ in range(num_steps):
+        prediction = model.predict(current_sequence.reshape(1, seq_length, 1))
+        future_predictions.append(prediction[0, 0])
+        current_sequence = np.roll(current_sequence, -1)
+        current_sequence[-1] = prediction
+    
+    return np.array(future_predictions).reshape(-1, 1)
+
+# Predict the next 30 days
+last_sequence = scaled_data[-seq_length:]
+future_predictions = predict_future(model, last_sequence, 30)
+future_predictions = scaler.inverse_transform(future_predictions)
+
+# Plot future predictions
+future_dates = pd.date_range(start=df['Date'].iloc[-1] + pd.Timedelta(days=1), periods=30)
+plt.figure(figsize=(16, 8))
+plt.plot(df['Date'], data, label='Historical Data')
+plt.plot(future_dates, future_predictions, label='Future Predictions')
+plt.title('AAPL Stock Price Prediction - Next 30 Days')
+plt.xlabel('Date')
+plt.ylabel('Close Price')
+plt.legend()
+plt.show()
+
+# Step 4: Evaluation and prediction
+# Make predictions
+train_predict = model.predict(X_train)
+test_predict = model.predict(X_test)
+
+# Inverse transform the predictions and actual values
+train_predict = scaler.inverse_transform(train_predict)
+y_train_inv = scaler.inverse_transform(y_train)
+test_predict = scaler.inverse_transform(test_predict)
+y_test_inv = scaler.inverse_transform(y_test)
+
+# Calculate evaluation metrics
+def calculate_metrics(y_true, y_pred):
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_true, y_pred)
+    return mae, mse, rmse, r2
+
+train_mae, train_mse, train_rmse, train_r2 = calculate_metrics(y_train_inv, train_predict)
+test_mae, test_mse, test_rmse, test_r2 = calculate_metrics(y_test_inv, test_predict)
+
+print("Training Set Metrics:")
+print(f"MAE: {train_mae:.4f}")
+print(f"MSE: {train_mse:.4f}")
+print(f"RMSE: {train_rmse:.4f}")
+print(f"R2 Score: {train_r2:.4f}")
+
+print("\nTest Set Metrics:")
+print(f"MAE: {test_mae:.4f}")
+print(f"MSE: {test_mse:.4f}")
+print(f"RMSE: {test_rmse:.4f}")
+print(f"R2 Score: {test_r2:.4f}")
+
+# Calculate percentage error
+def mean_absolute_percentage_error(y_true, y_pred):
+    return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+
+train_mape = mean_absolute_percentage_error(y_train_inv, train_predict)
+test_mape = mean_absolute_percentage_error(y_test_inv, test_predict)
+
+print(f"\nTraining Set MAPE: {train_mape:.2f}%")
+print(f"Test Set MAPE: {test_mape:.2f}%")

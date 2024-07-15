@@ -1,0 +1,181 @@
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import matplotlib.pyplot as plt
+
+# Define the MANN model
+class MANNModel(nn.Module):
+    def __init__(self, input_size, hidden_size, memory_size, output_size):
+        super(MANNModel, self).__init__()
+        self.hidden_size = hidden_size
+        self.memory_size = memory_size
+        
+        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
+        self.memory = nn.Parameter(torch.zeros(memory_size, hidden_size), requires_grad=True)
+        
+        self.fc = nn.Linear(hidden_size + hidden_size, output_size)
+    
+    def forward(self, x):
+        batch_size = x.size(0)
+        h0 = torch.zeros(1, batch_size, self.hidden_size).to(x.device)
+        c0 = torch.zeros(1, batch_size, self.hidden_size).to(x.device)
+        
+        out, (hn, cn) = self.lstm(x, (h0, c0))
+        
+        # Read from memory
+        memory_read = self.memory.unsqueeze(0).expand(batch_size, -1, -1)
+        
+        combined = torch.cat((out[:, -1, :], memory_read.mean(dim=1)), dim=1)
+        out = self.fc(combined)
+        
+        # Update memory
+        hn_mean = hn.squeeze(0)
+        self.memory.data = self.memory.data * 0.99 + hn_mean.mean(dim=0) * 0.01
+        
+        return out
+    
+# Load and preprocess data
+df = pd.read_csv(r'Stock Prediction\YahooFinance\AAPL\AAPL.csv')  # Use raw string to avoid escape sequence error
+df['Date'] = pd.to_datetime(df['Date'])
+df.set_index('Date', inplace=True)
+
+# Use only the 'Close' price for simplicity
+data = df[['Close']].values
+
+# Normalize the data
+scaler = MinMaxScaler()
+data = scaler.fit_transform(data)
+
+# Create sequences
+def create_sequences(data, seq_length):
+    xs = []
+    ys = []
+    for i in range(len(data) - seq_length):
+        x = data[i:i + seq_length]
+        y = data[i + seq_length]
+        xs.append(x)
+        ys.append(y)
+    return np.array(xs), np.array(ys)
+
+seq_length = 60
+X, y = create_sequences(data, seq_length)
+
+# Split the data
+split = int(0.8 * len(X))
+X_train, y_train = X[:split], y[:split]
+X_test, y_test = X[split:], y[split:]
+
+# Convert to PyTorch tensors
+train_dataset = TensorDataset(torch.tensor(X_train).float(), torch.tensor(y_train).float())
+test_dataset = TensorDataset(torch.tensor(X_test).float(), torch.tensor(y_test).float())
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+
+# Hyperparameters
+input_size = X_train.shape[2]
+hidden_size = 64
+memory_size = 64  # Set memory_size to be compatible with hidden_size
+output_size = 1
+learning_rate = 0.001
+num_epochs = 50
+
+# Device configuration
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Using device: {device}')
+
+# Initialize model, loss function, and optimizer
+model = MANNModel(input_size, hidden_size, memory_size, output_size).to(device)
+criterion = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+# Training loop
+train_losses = []
+for epoch in range(num_epochs):
+    model.train()
+    epoch_loss = 0
+    for features, target in train_loader:
+        features, target = features.to(device), target.to(device)
+        
+        outputs = model(features)
+        loss = criterion(outputs, target)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        
+        for name, param in model.named_parameters():
+            if param.grad is None:
+                print(f"Warning: {name} has no gradient")
+        
+        optimizer.step()
+        model.memory.grad = None
+        
+        epoch_loss += loss.item()
+    
+    avg_loss = epoch_loss / len(train_loader)
+    train_losses.append(avg_loss)
+    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}')
+
+# Evaluation function
+def evaluate(model, data_loader, scaler):
+    model.eval()
+    y_pred = []
+    y_true = []
+    with torch.no_grad():
+        for features, target in data_loader:
+            features, target = features.to(device), target.to(device)
+            outputs = model(features)
+            y_pred.extend(outputs.cpu().numpy())
+            y_true.extend(target.cpu().numpy())
+
+    y_pred = np.array(y_pred).flatten()
+    y_true = np.array(y_true).flatten()
+
+    y_pred = scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+    y_true = scaler.inverse_transform(y_true.reshape(-1, 1)).flatten()
+
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_true, y_pred)
+
+    return mae, mse, rmse, r2, y_true, y_pred
+
+# Evaluate on training set
+train_mae, train_mse, train_rmse, train_r2, train_true, train_pred = evaluate(model, train_loader, scaler)
+
+print("Training Set Evaluation:")
+print(f'Mean Absolute Error (MAE): {train_mae:.4f}')
+print(f'Mean Squared Error (MSE): {train_mse:.4f}')
+print(f'Root Mean Squared Error (RMSE): {train_rmse:.4f}')
+print(f'R2 Score: {train_r2:.4f}')
+
+# Evaluate on test set
+test_mae, test_mse, test_rmse, test_r2, test_true, test_pred = evaluate(model, test_loader, scaler)
+
+print("\nTest Set Evaluation:")
+print(f'Mean Absolute Error (MAE): {test_mae:.4f}')
+print(f'Mean Squared Error (MSE): {test_mse:.4f}')
+print(f'Root Mean Squared Error (RMSE): {test_rmse:.4f}')
+print(f'R2 Score: {test_r2:.4f}')
+
+# Plotting the results
+plt.figure(figsize=(14, 7))
+plt.plot(test_true, label='Actual Values')
+plt.plot(test_pred, label='Predicted Values')
+plt.title('MANN Model (GRU) Predictions vs Actual Values (Test Set)')
+plt.xlabel('Time')
+plt.ylabel('Stock Price')
+plt.legend()
+plt.show()
+
+# Plotting training loss
+plt.figure(figsize=(14, 7))
+plt.plot(train_losses)
+plt.title('Training Loss Over Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.show()
